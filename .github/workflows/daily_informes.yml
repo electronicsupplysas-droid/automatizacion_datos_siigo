@@ -23,14 +23,14 @@ on:
         required: false
         default: ""
       solo:
-        description: "Ejecutar solo un informe (opcional)"
+        description: "Ejecutar solo una operación (opcional)"
         required: false
         default: ""
         type: choice
         options:
           - ""
-          - ventas
-          - comisiones
+          - documentos
+          - recibos
           - cartera
 
 jobs:

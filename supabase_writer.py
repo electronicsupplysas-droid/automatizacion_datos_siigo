@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-Escritura de informes Siigo a Supabase (PostgreSQL).
+Escritura de datos Siigo a Supabase (PostgreSQL).
+
+Tablas objetivo:
+  documentos    — una fila por FV o NC, upsert por id_siigo
+  recibos_caja  — una fila por línea de pago RC, upsert por (id_recibo, factura_referenciada)
 
 Requiere la variable de entorno:
-  SUPABASE_DB_URL  — cadena de conexión completa
+  SUPABASE_DB_URL  — cadena de conexión completa al connection pooler
                      postgresql://postgres.[ref]:[password]@aws-...:6543/postgres
-
-Las tablas deben existir previamente (ver schema.sql en el repo).
 """
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 import psycopg2
@@ -32,31 +34,39 @@ def _ts() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# ── Ventas por cliente ─────────────────────────────────────────────────────────
+# ── documentos ────────────────────────────────────────────────────────────────
 
-def upsert_ventas(rows: list[dict[str, Any]], from_date: date, to_date: date) -> int:
-    """Reemplaza las filas de ventas para el período dado (delete + insert)."""
+def upsert_documentos(rows: list[dict[str, Any]]) -> int:
+    """
+    Inserta o actualiza documentos por id_siigo.
+    En conflicto actualiza balance_cop y ultima_actualizacion para mantener
+    el saldo siempre vigente sin perder los datos originales del documento.
+    """
     if not rows:
         return 0
     ts = _ts()
     with _conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM ventas_por_cliente WHERE periodo = %s AND periodo_fin = %s",
-            (from_date, to_date),
-        )
         records = [
             (
-                from_date,
-                to_date,
-                r["Identificación"],
-                r["Cliente"],
-                r["Número de comprobantes"],
-                r["Valor bruto"],
-                r["Descuentos por item"],
-                r["Subtotal"],
-                r["Impuesto cargo"],
-                r["Impuesto retención"],
-                r["Total"],
+                r["id_siigo"],
+                r["nombre"],
+                r["tipo"],
+                r["fecha"],
+                r["fecha_vencimiento"],
+                r["nit_cliente"],
+                r["nombre_cliente"],
+                r["ciudad_cliente"],
+                r["id_vendedor"],
+                r["nombre_vendedor"],
+                r["centro_costo"],
+                r["moneda"],
+                r["tasa_cambio"],
+                r["valor_bruto_cop"],
+                r["descuentos_cop"],
+                r["subtotal_cop"],
+                r["impuesto_cop"],
+                r["total_cop"],
+                r["balance_cop"],
                 ts,
             )
             for r in rows
@@ -64,44 +74,46 @@ def upsert_ventas(rows: list[dict[str, Any]], from_date: date, to_date: date) ->
         psycopg2.extras.execute_values(
             cur,
             """
-            INSERT INTO ventas_por_cliente
-              (periodo, periodo_fin, nit, cliente, num_comprobantes,
-               valor_bruto, descuentos, subtotal, impuesto_cargo,
-               impuesto_retencion, total, generado_en)
+            INSERT INTO documentos
+              (id_siigo, nombre, tipo, fecha, fecha_vencimiento,
+               nit_cliente, nombre_cliente, ciudad_cliente,
+               id_vendedor, nombre_vendedor, centro_costo,
+               moneda, tasa_cambio,
+               valor_bruto_cop, descuentos_cop, subtotal_cop, impuesto_cop,
+               total_cop, balance_cop, ultima_actualizacion)
             VALUES %s
+            ON CONFLICT (id_siigo) DO UPDATE SET
+              balance_cop          = EXCLUDED.balance_cop,
+              nombre_vendedor      = EXCLUDED.nombre_vendedor,
+              fecha_vencimiento    = EXCLUDED.fecha_vencimiento,
+              ultima_actualizacion = EXCLUDED.ultima_actualizacion
             """,
             records,
         )
     return len(records)
 
 
-# ── Cartera ────────────────────────────────────────────────────────────────────
+# ── recibos_caja ──────────────────────────────────────────────────────────────
 
-def upsert_cartera(rows: list[dict[str, Any]], snapshot_date: date) -> int:
-    """Reemplaza el snapshot de cartera para la fecha de corte dada."""
+def upsert_recibos(rows: list[dict[str, Any]]) -> int:
+    """
+    Inserta o actualiza recibos por (id_recibo, factura_referenciada).
+    En conflicto actualiza monto_cop y fecha_cobro.
+    """
     if not rows:
         return 0
     ts = _ts()
     with _conn() as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM cartera WHERE snapshot_date = %s", (snapshot_date,))
         records = [
             (
-                snapshot_date,
-                r["Identificación"],
-                r["Cliente"],
-                r.get("Sucursal") or None,
-                r["Documento"],
-                r.get("Fecha vencimiento") or None,
-                r.get("Centro de costo") or None,
-                r.get("Vendedor") or None,
-                r.get("Ciudad") or None,
-                r["Vencido 1 a 30"],
-                r["Vencido 31 a 60"],
-                r["Vencido 61 a 90"],
-                r["Vencido más de 91"],
-                r["Saldo por vencer"],
-                r["Saldo a favor"],
-                r["Total cartera"],
+                r["id_recibo"],
+                r["fecha_cobro"],
+                r["factura_referenciada"],
+                r["nit_cliente"],
+                r["nombre_cliente"],
+                r["id_vendedor"],
+                r["nombre_vendedor"],
+                r["monto_cop"],
                 ts,
             )
             for r in rows
@@ -109,112 +121,16 @@ def upsert_cartera(rows: list[dict[str, Any]], snapshot_date: date) -> int:
         psycopg2.extras.execute_values(
             cur,
             """
-            INSERT INTO cartera
-              (snapshot_date, nit, cliente, sucursal, documento,
-               fecha_vencimiento, centro_costo, vendedor, ciudad,
-               vencido_1_30, vencido_31_60, vencido_61_90, vencido_mas_91,
-               saldo_por_vencer, saldo_a_favor, total_cartera, generado_en)
+            INSERT INTO recibos_caja
+              (id_recibo, fecha_cobro, factura_referenciada,
+               nit_cliente, nombre_cliente,
+               id_vendedor, nombre_vendedor,
+               monto_cop, ultima_actualizacion)
             VALUES %s
-            """,
-            records,
-        )
-    return len(records)
-
-
-# ── Comisiones pagadas ─────────────────────────────────────────────────────────
-
-def upsert_comisiones_detalle(
-    rows: list[dict[str, Any]],
-    from_date: date,
-    to_date: date,
-) -> int:
-    """Reemplaza el detalle de comisiones cobradas para el período dado."""
-    if not rows:
-        return 0
-    ts = _ts()
-    with _conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM comisiones_detalle WHERE periodo = %s AND periodo_fin = %s",
-            (from_date, to_date),
-        )
-        records = [
-            (
-                from_date,
-                to_date,
-                r["mes_cobro"],
-                r["fecha_factura"],
-                r["factura"],
-                r.get("moneda") or "COP",
-                r["fecha_pago"],
-                r["recibo"],
-                r["cliente"],
-                r.get("vendedor") or "",
-                r.get("vendedor_id") or "",
-                r["total_factura"],
-                r.get("nc_ids") or None,
-                r["total_nc"],
-                r["saldo_neto"],
-                r["comision"],
-                ts,
-            )
-            for r in rows
-        ]
-        psycopg2.extras.execute_values(
-            cur,
-            """
-            INSERT INTO comisiones_detalle
-              (periodo, periodo_fin, mes_cobro, fecha_factura, factura, moneda,
-               fecha_pago, recibo, cliente, vendedor, vendedor_id,
-               total_factura, nc_ids, total_nc, saldo_neto, comision, generado_en)
-            VALUES %s
-            """,
-            records,
-        )
-    return len(records)
-
-
-# ── Comisiones pendientes ──────────────────────────────────────────────────────
-
-def upsert_comisiones_pendientes(
-    rows: list[dict[str, Any]],
-    snapshot_date: date,
-) -> int:
-    """Reemplaza las comisiones pendientes del snapshot de hoy."""
-    if not rows:
-        return 0
-    ts = _ts()
-    with _conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM comisiones_pendientes WHERE snapshot_date = %s",
-            (snapshot_date,),
-        )
-        records = [
-            (
-                snapshot_date,
-                r["fecha_factura"],
-                r["factura"],
-                r.get("moneda") or "COP",
-                r["cliente"],
-                r.get("vendedor") or "",
-                r["total_factura"],
-                r.get("nc_ids") or None,
-                r["total_nc"],
-                r["saldo_neto"],
-                r["comision_pte"],
-                r["dias_sin_pago"],
-                r.get("balance_api") or 0,
-                ts,
-            )
-            for r in rows
-        ]
-        psycopg2.extras.execute_values(
-            cur,
-            """
-            INSERT INTO comisiones_pendientes
-              (snapshot_date, fecha_factura, factura, moneda, cliente, vendedor,
-               total_factura, nc_ids, total_nc, saldo_neto, comision_pendiente,
-               dias_sin_pago, balance_api, generado_en)
-            VALUES %s
+            ON CONFLICT (id_recibo, factura_referenciada) DO UPDATE SET
+              fecha_cobro          = EXCLUDED.fecha_cobro,
+              monto_cop            = EXCLUDED.monto_cop,
+              ultima_actualizacion = EXCLUDED.ultima_actualizacion
             """,
             records,
         )

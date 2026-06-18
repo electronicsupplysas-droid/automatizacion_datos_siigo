@@ -1,101 +1,164 @@
--- schema.sql
--- Ejecutar una sola vez en Supabase → SQL Editor
--- Supabase > Project > SQL Editor > New query → pegar y ejecutar
+-- schema.sql — Ejecutar en Supabase → SQL Editor
+-- Elimina el esquema anterior y crea el nuevo diseño desagregado.
+-- Correr una sola vez (o cuando se quiera resetear las tablas).
 
--- ── Ventas por cliente ────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS ventas_por_cliente (
-    id                  BIGSERIAL PRIMARY KEY,
-    periodo             DATE        NOT NULL,  -- primer día del período (from_date)
-    periodo_fin         DATE        NOT NULL,  -- último día del período (to_date)
-    nit                 TEXT,
-    cliente             TEXT        NOT NULL,
-    num_comprobantes    INTEGER     NOT NULL DEFAULT 0,
-    valor_bruto         NUMERIC(18,2) NOT NULL DEFAULT 0,
-    descuentos          NUMERIC(18,2) NOT NULL DEFAULT 0,
-    subtotal            NUMERIC(18,2) NOT NULL DEFAULT 0,
-    impuesto_cargo      NUMERIC(18,2) NOT NULL DEFAULT 0,
-    impuesto_retencion  NUMERIC(18,2) NOT NULL DEFAULT 0,
-    total               NUMERIC(18,2) NOT NULL DEFAULT 0,
-    generado_en         TIMESTAMPTZ NOT NULL
+-- ── Eliminar tablas anteriores (si existen) ───────────────────────────────────
+DROP TABLE IF EXISTS ventas_por_cliente    CASCADE;
+DROP TABLE IF EXISTS cartera               CASCADE;
+DROP TABLE IF EXISTS comisiones_detalle    CASCADE;
+DROP TABLE IF EXISTS comisiones_pendientes CASCADE;
+
+-- ── documentos ────────────────────────────────────────────────────────────────
+-- Una fila por documento (FV = Factura Venta, NC = Nota Crédito).
+-- Upsert por id_siigo: balance_cop se actualiza diariamente vía cartera_update.
+--
+-- Notas de diseño:
+--   total_cop   = doc.total × tasa_cambio  (campo oficial de Siigo)
+--   balance_cop = doc.balance × tasa_cambio (solo FV; NC siempre 0)
+--   valor_bruto/descuentos/impuesto: calculados desde items (mejor esfuerzo)
+--   fecha_vencimiento: payments[].due_date máximo, nunca el campo raíz
+--   DF y ND no disponibles vía API → nunca aparecen en esta tabla
+CREATE TABLE IF NOT EXISTS documentos (
+    id                   BIGSERIAL    PRIMARY KEY,
+    id_siigo             TEXT         NOT NULL UNIQUE,
+    nombre               TEXT         NOT NULL,             -- "FV-1-1234"
+    tipo                 TEXT         NOT NULL CHECK (tipo IN ('FV', 'NC')),
+    fecha                DATE,
+    fecha_vencimiento    DATE,
+    nit_cliente          TEXT,
+    nombre_cliente       TEXT,
+    ciudad_cliente       TEXT,
+    id_vendedor          TEXT,
+    nombre_vendedor      TEXT,
+    centro_costo         TEXT,
+    moneda               TEXT         NOT NULL DEFAULT 'COP',
+    tasa_cambio          NUMERIC(12,6) NOT NULL DEFAULT 1,
+    valor_bruto_cop      NUMERIC(18,2) NOT NULL DEFAULT 0,
+    descuentos_cop       NUMERIC(18,2) NOT NULL DEFAULT 0,
+    subtotal_cop         NUMERIC(18,2) NOT NULL DEFAULT 0,
+    impuesto_cop         NUMERIC(18,2) NOT NULL DEFAULT 0,
+    total_cop            NUMERIC(18,2) NOT NULL DEFAULT 0,
+    balance_cop          NUMERIC(18,2) NOT NULL DEFAULT 0,  -- actualizado diariamente
+    ultima_actualizacion TIMESTAMPTZ  NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_ventas_periodo ON ventas_por_cliente (periodo, periodo_fin);
-CREATE INDEX IF NOT EXISTS idx_ventas_nit     ON ventas_por_cliente (nit);
+CREATE INDEX IF NOT EXISTS idx_doc_tipo            ON documentos (tipo);
+CREATE INDEX IF NOT EXISTS idx_doc_fecha           ON documentos (fecha);
+CREATE INDEX IF NOT EXISTS idx_doc_nit             ON documentos (nit_cliente);
+CREATE INDEX IF NOT EXISTS idx_doc_vendedor        ON documentos (nombre_vendedor);
+CREATE INDEX IF NOT EXISTS idx_doc_balance         ON documentos (balance_cop) WHERE balance_cop > 0;
+CREATE INDEX IF NOT EXISTS idx_doc_fecha_venc      ON documentos (fecha_vencimiento);
 
 
--- ── Cartera ───────────────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS cartera (
-    id                  BIGSERIAL PRIMARY KEY,
-    snapshot_date       DATE        NOT NULL,  -- fecha de corte (hoy al ejecutar)
-    nit                 TEXT,
-    cliente             TEXT        NOT NULL,
-    sucursal            TEXT,
-    documento           TEXT        NOT NULL,  -- nombre de la factura, ej. FV-1-1234
-    fecha_vencimiento   DATE,
-    centro_costo        TEXT,
-    vendedor            TEXT,
-    ciudad              TEXT,
-    vencido_1_30        NUMERIC(18,2) NOT NULL DEFAULT 0,
-    vencido_31_60       NUMERIC(18,2) NOT NULL DEFAULT 0,
-    vencido_61_90       NUMERIC(18,2) NOT NULL DEFAULT 0,
-    vencido_mas_91      NUMERIC(18,2) NOT NULL DEFAULT 0,
-    saldo_por_vencer    NUMERIC(18,2) NOT NULL DEFAULT 0,
-    saldo_a_favor       NUMERIC(18,2) NOT NULL DEFAULT 0,
-    total_cartera       NUMERIC(18,2) NOT NULL DEFAULT 0,
-    generado_en         TIMESTAMPTZ NOT NULL
+-- ── recibos_caja ──────────────────────────────────────────────────────────────
+-- Una fila por línea de pago dentro de un voucher (RC = Recibo de Caja).
+-- Un mismo RC puede pagar varias facturas → varias filas con el mismo id_recibo.
+-- factura_referenciada: "{prefix}-{consecutive}" igual que documentos.nombre
+CREATE TABLE IF NOT EXISTS recibos_caja (
+    id                   BIGSERIAL    PRIMARY KEY,
+    id_recibo            TEXT         NOT NULL,             -- "RC-2-123"
+    fecha_cobro          DATE,
+    factura_referenciada TEXT         NOT NULL,             -- "FV-1-1234"
+    nit_cliente          TEXT,
+    nombre_cliente       TEXT,
+    id_vendedor          TEXT,
+    nombre_vendedor      TEXT,
+    monto_cop            NUMERIC(18,2) NOT NULL DEFAULT 0,
+    ultima_actualizacion TIMESTAMPTZ  NOT NULL,
+    UNIQUE (id_recibo, factura_referenciada)
 );
 
-CREATE INDEX IF NOT EXISTS idx_cartera_snapshot  ON cartera (snapshot_date);
-CREATE INDEX IF NOT EXISTS idx_cartera_nit        ON cartera (nit);
-CREATE INDEX IF NOT EXISTS idx_cartera_documento  ON cartera (documento);
+CREATE INDEX IF NOT EXISTS idx_rc_fecha_cobro  ON recibos_caja (fecha_cobro);
+CREATE INDEX IF NOT EXISTS idx_rc_factura_ref  ON recibos_caja (factura_referenciada);
+CREATE INDEX IF NOT EXISTS idx_rc_nit          ON recibos_caja (nit_cliente);
+CREATE INDEX IF NOT EXISTS idx_rc_vendedor     ON recibos_caja (nombre_vendedor);
 
 
--- ── Comisiones pagadas ────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS comisiones_detalle (
-    id              BIGSERIAL PRIMARY KEY,
-    periodo         DATE        NOT NULL,  -- from_date del informe
-    periodo_fin     DATE        NOT NULL,  -- to_date del informe
-    mes_cobro       TEXT        NOT NULL,  -- "2026-05" (mes en que se cobró)
-    fecha_factura   DATE,
-    factura         TEXT        NOT NULL,  -- nombre, ej. FV-1-1234
-    moneda          TEXT        NOT NULL DEFAULT 'COP',
-    fecha_pago      DATE,
-    recibo          TEXT,                  -- nombre del recibo de caja
-    cliente         TEXT,
-    vendedor        TEXT,
-    vendedor_id     TEXT,
-    total_factura   NUMERIC(18,2) NOT NULL DEFAULT 0,
-    nc_ids          TEXT,                  -- IDs de notas crédito separados por coma
-    total_nc        NUMERIC(18,2) NOT NULL DEFAULT 0,
-    saldo_neto      NUMERIC(18,2) NOT NULL DEFAULT 0,
-    comision        NUMERIC(18,2) NOT NULL DEFAULT 0,
-    generado_en     TIMESTAMPTZ NOT NULL
-);
+-- ── Vistas útiles para Looker Studio ─────────────────────────────────────────
 
-CREATE INDEX IF NOT EXISTS idx_com_det_periodo  ON comisiones_detalle (periodo, periodo_fin);
-CREATE INDEX IF NOT EXISTS idx_com_det_vendedor ON comisiones_detalle (vendedor);
-CREATE INDEX IF NOT EXISTS idx_com_det_factura  ON comisiones_detalle (factura);
+-- Ventas por mes y cliente (equivale al antiguo informe ventas_por_cliente)
+CREATE OR REPLACE VIEW v_ventas_mes AS
+SELECT
+    DATE_TRUNC('month', fecha)::DATE AS mes,
+    nit_cliente,
+    nombre_cliente,
+    ciudad_cliente,
+    nombre_vendedor,
+    centro_costo,
+    moneda,
+    SUM(CASE WHEN tipo = 'FV' THEN total_cop ELSE 0 END)  AS total_fv_cop,
+    SUM(CASE WHEN tipo = 'NC' THEN total_cop ELSE 0 END)  AS total_nc_cop,
+    SUM(CASE WHEN tipo = 'FV' THEN total_cop
+             WHEN tipo = 'NC' THEN -total_cop END)         AS neto_cop,
+    COUNT(CASE WHEN tipo = 'FV' THEN 1 END)               AS num_facturas,
+    COUNT(CASE WHEN tipo = 'NC' THEN 1 END)               AS num_nc
+FROM documentos
+WHERE fecha IS NOT NULL
+GROUP BY 1, 2, 3, 4, 5, 6, 7;
 
+-- Cartera vigente (snapshot en tiempo real)
+CREATE OR REPLACE VIEW v_cartera AS
+SELECT
+    d.nombre               AS documento,
+    d.fecha                AS fecha_factura,
+    d.fecha_vencimiento,
+    d.nit_cliente,
+    d.nombre_cliente,
+    d.ciudad_cliente,
+    d.nombre_vendedor,
+    d.centro_costo,
+    d.moneda,
+    d.total_cop,
+    d.balance_cop,
+    CURRENT_DATE - d.fecha_vencimiento         AS dias_vencido,
+    CASE
+        WHEN d.fecha_vencimiento IS NULL THEN 'Sin vencimiento'
+        WHEN CURRENT_DATE <= d.fecha_vencimiento THEN 'Por vencer'
+        WHEN CURRENT_DATE - d.fecha_vencimiento <= 30  THEN 'Vencido 1-30'
+        WHEN CURRENT_DATE - d.fecha_vencimiento <= 60  THEN 'Vencido 31-60'
+        WHEN CURRENT_DATE - d.fecha_vencimiento <= 90  THEN 'Vencido 61-90'
+        ELSE 'Vencido >91'
+    END                                        AS bucket_vencimiento,
+    d.ultima_actualizacion
+FROM documentos d
+WHERE d.tipo = 'FV'
+  AND d.balance_cop > 0;
 
--- ── Comisiones pendientes ─────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS comisiones_pendientes (
-    id                  BIGSERIAL PRIMARY KEY,
-    snapshot_date       DATE        NOT NULL,  -- fecha en que se tomó el snapshot
-    fecha_factura       DATE,
-    factura             TEXT        NOT NULL,
-    moneda              TEXT        NOT NULL DEFAULT 'COP',
-    cliente             TEXT,
-    vendedor            TEXT,
-    total_factura       NUMERIC(18,2) NOT NULL DEFAULT 0,
-    nc_ids              TEXT,
-    total_nc            NUMERIC(18,2) NOT NULL DEFAULT 0,
-    saldo_neto          NUMERIC(18,2) NOT NULL DEFAULT 0,
-    comision_pendiente  NUMERIC(18,2) NOT NULL DEFAULT 0,
-    dias_sin_pago       INTEGER      NOT NULL DEFAULT 0,
-    balance_api         NUMERIC(18,2) NOT NULL DEFAULT 0,
-    generado_en         TIMESTAMPTZ NOT NULL
-);
+-- Comisiones cobradas (FV con recibo de caja asociado)
+CREATE OR REPLACE VIEW v_comisiones_cobradas AS
+SELECT
+    rc.fecha_cobro,
+    DATE_TRUNC('month', rc.fecha_cobro)::DATE  AS mes_cobro,
+    rc.id_recibo,
+    rc.factura_referenciada,
+    d.fecha                                    AS fecha_factura,
+    d.nit_cliente,
+    d.nombre_cliente,
+    COALESCE(rc.nombre_vendedor, d.nombre_vendedor) AS vendedor,
+    d.moneda,
+    d.total_cop                                AS total_factura_cop,
+    rc.monto_cop                               AS monto_cobrado_cop,
+    ROUND(rc.monto_cop * 0.03, 2)             AS comision_cop
+FROM recibos_caja rc
+LEFT JOIN documentos d ON d.nombre = rc.factura_referenciada;
 
-CREATE INDEX IF NOT EXISTS idx_com_pte_snapshot ON comisiones_pendientes (snapshot_date);
-CREATE INDEX IF NOT EXISTS idx_com_pte_factura  ON comisiones_pendientes (factura);
-CREATE INDEX IF NOT EXISTS idx_com_pte_vendedor ON comisiones_pendientes (vendedor);
+-- Comisiones pendientes (FV sin recibo de caja)
+CREATE OR REPLACE VIEW v_comisiones_pendientes AS
+SELECT
+    d.nombre               AS factura,
+    d.fecha                AS fecha_factura,
+    d.nit_cliente,
+    d.nombre_cliente,
+    d.nombre_vendedor      AS vendedor,
+    d.moneda,
+    d.total_cop,
+    d.balance_cop,
+    ROUND(d.balance_cop * 0.03, 2)            AS comision_pendiente,
+    CURRENT_DATE - d.fecha::DATE              AS dias_sin_cobro
+FROM documentos d
+WHERE d.tipo = 'FV'
+  AND d.balance_cop > 0
+  AND NOT EXISTS (
+      SELECT 1 FROM recibos_caja rc
+      WHERE rc.factura_referenciada = d.nombre
+  );
