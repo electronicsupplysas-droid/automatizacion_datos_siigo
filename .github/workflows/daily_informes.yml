@@ -7,13 +7,21 @@ on:
   workflow_dispatch:
     inputs:
       periodo:
-        description: "Período a procesar"
+        description: "Período a procesar (ignorado si usas fechas personalizadas)"
         required: false
         default: "mes-actual"
         type: choice
         options:
           - mes-actual
           - mes-pasado
+      from_date:
+        description: "Fecha inicial personalizada (YYYY-MM-DD) — ej. 2026-01-01"
+        required: false
+        default: ""
+      to_date:
+        description: "Fecha final personalizada (YYYY-MM-DD) — ej. 2026-06-17"
+        required: false
+        default: ""
       solo:
         description: "Ejecutar solo un informe (opcional)"
         required: false
@@ -61,8 +69,9 @@ jobs:
           SIIGO_PARTNER_ID: ${{ secrets.SIIGO_PARTNER_ID }}
           SUPABASE_DB_URL:  ${{ secrets.SUPABASE_DB_URL }}
         run: |
-          ARGS=""
-          if [ "${{ inputs.periodo }}" = "mes-pasado" ]; then
+          if [ -n "${{ inputs.from_date }}" ] && [ -n "${{ inputs.to_date }}" ]; then
+            ARGS="--from-date ${{ inputs.from_date }} --to-date ${{ inputs.to_date }}"
+          elif [ "${{ inputs.periodo }}" = "mes-pasado" ]; then
             ARGS="--mes-pasado"
           else
             ARGS="--mes-actual"
