@@ -76,6 +76,27 @@ _KNOWN_LIMITS = [
 
 # ── Cálculo de períodos ───────────────────────────────────────────────────────
 
+def _months_in_range(from_date: date, to_date: date) -> list[tuple[date, date]]:
+    """Divide un rango en sub-períodos mensuales para evitar límites de la API."""
+    months = []
+    cursor = from_date.replace(day=1)
+    while cursor <= to_date:
+        first = max(cursor, from_date)
+        # último día del mes
+        if cursor.month == 12:
+            last = cursor.replace(year=cursor.year + 1, month=1, day=1) - timedelta(days=1)
+        else:
+            last = cursor.replace(month=cursor.month + 1, day=1) - timedelta(days=1)
+        last = min(last, to_date)
+        months.append((first, last))
+        cursor = last.replace(day=1)
+        if cursor.month == 12:
+            cursor = cursor.replace(year=cursor.year + 1, month=1, day=1)
+        else:
+            cursor = cursor.replace(month=cursor.month + 1, day=1)
+    return months
+
+
 def _period_mes_actual() -> tuple[date, date]:
     today     = date.today()
     yesterday = today - timedelta(days=1)
@@ -314,31 +335,42 @@ def main() -> int:
 
     results: list[dict[str, Any]] = []
 
+    # Cuando el rango cubre varios meses, iterar mes a mes para respetar
+    # los límites de la API de Siigo y tener datos por mes en Supabase.
+    months = _months_in_range(from_date, to_date)
+    multi_mes = len(months) > 1
+    if multi_mes:
+        print(f"  Rango multi-mes: se procesarán {len(months)} meses individualmente.")
+
     # ── Ventas por cliente ────────────────────────────────────────────────────
     if args.solo in (None, "ventas"):
-        try:
-            results.append(_run_ventas_por_cliente(config, from_date, to_date, args.timeout))
-        except Exception as exc:
-            print(f"\n  ✗ Ventas por cliente FALLÓ: {exc}", file=sys.stderr)
-            results.append({
-                "informe": "ventas_por_cliente",
-                "estado": "error",
-                "error": str(exc),
-                "traceback": traceback.format_exc(),
-            })
+        for m_from, m_to in months:
+            try:
+                results.append(_run_ventas_por_cliente(config, m_from, m_to, args.timeout))
+            except Exception as exc:
+                print(f"\n  ✗ Ventas {m_from}→{m_to} FALLÓ: {exc}", file=sys.stderr)
+                results.append({
+                    "informe": "ventas_por_cliente",
+                    "estado": "error",
+                    "periodo": f"{m_from}→{m_to}",
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                })
 
     # ── Comisiones ────────────────────────────────────────────────────────────
     if args.solo in (None, "comisiones"):
-        try:
-            results.append(_run_comisiones(config, from_date, to_date, args.timeout))
-        except Exception as exc:
-            print(f"\n  ✗ Comisiones FALLÓ: {exc}", file=sys.stderr)
-            results.append({
-                "informe": "comisiones",
-                "estado": "error",
-                "error": str(exc),
-                "traceback": traceback.format_exc(),
-            })
+        for m_from, m_to in months:
+            try:
+                results.append(_run_comisiones(config, m_from, m_to, args.timeout))
+            except Exception as exc:
+                print(f"\n  ✗ Comisiones {m_from}→{m_to} FALLÓ: {exc}", file=sys.stderr)
+                results.append({
+                    "informe": "comisiones",
+                    "estado": "error",
+                    "periodo": f"{m_from}→{m_to}",
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                })
 
     # ── Cartera ───────────────────────────────────────────────────────────────
     if args.solo in (None, "cartera"):
