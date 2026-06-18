@@ -52,6 +52,14 @@ jobs:
       - name: Instalar dependencias
         run: pip install -r requirements.txt
 
+      - name: Ping Supabase (evitar inactividad en plan gratuito)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "${{ secrets.SUPABASE_URL }}/rest/v1/documentos?limit=1" \
+            -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}")
+          echo "Supabase ping: HTTP $STATUS"
+
       - name: Ejecutar informes (schedule automático)
         if: github.event_name == 'schedule'
         env:
