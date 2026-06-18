@@ -1,0 +1,73 @@
+name: Informes Siigo → Supabase
+
+on:
+  schedule:
+    # 6 AM hora Colombia (UTC-5) = 11:00 UTC, de lunes a viernes
+    - cron: "0 11 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      periodo:
+        description: "Período a procesar"
+        required: false
+        default: "mes-actual"
+        type: choice
+        options:
+          - mes-actual
+          - mes-pasado
+      solo:
+        description: "Ejecutar solo un informe (opcional)"
+        required: false
+        default: ""
+        type: choice
+        options:
+          - ""
+          - ventas
+          - comisiones
+          - cartera
+
+jobs:
+  informes:
+    name: Descargar y subir informes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Ejecutar informes (schedule automático)
+        if: github.event_name == 'schedule'
+        env:
+          SIIGO_USERNAME:   ${{ secrets.SIIGO_USERNAME }}
+          SIIGO_ACCESS_KEY: ${{ secrets.SIIGO_ACCESS_KEY }}
+          SIIGO_PARTNER_ID: ${{ secrets.SIIGO_PARTNER_ID }}
+          SUPABASE_DB_URL:  ${{ secrets.SUPABASE_DB_URL }}
+        run: python3 run_informes.py --mes-actual
+
+      - name: Ejecutar informes (disparo manual)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          SIIGO_USERNAME:   ${{ secrets.SIIGO_USERNAME }}
+          SIIGO_ACCESS_KEY: ${{ secrets.SIIGO_ACCESS_KEY }}
+          SIIGO_PARTNER_ID: ${{ secrets.SIIGO_PARTNER_ID }}
+          SUPABASE_DB_URL:  ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.periodo }}" = "mes-pasado" ]; then
+            ARGS="--mes-pasado"
+          else
+            ARGS="--mes-actual"
+          fi
+          if [ -n "${{ inputs.solo }}" ]; then
+            ARGS="$ARGS --solo ${{ inputs.solo }}"
+          fi
+          python3 run_informes.py $ARGS

@@ -1,0 +1,47 @@
+name: Siigo Supabase Sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      sync_from_date:
+        description: "Fecha inicial YYYY-MM-DD"
+        required: false
+        type: string
+      sync_to_date:
+        description: "Fecha final YYYY-MM-DD"
+        required: false
+        type: string
+      days_back:
+        description: "Días hacia atrás si no defines rango"
+        required: false
+        type: string
+  schedule:
+    - cron: "15 11 * * *"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SIIGO_USERNAME: ${{ secrets.SIIGO_USERNAME }}
+      SIIGO_ACCESS_KEY: ${{ secrets.SIIGO_ACCESS_KEY }}
+      SIIGO_PARTNER_ID: ${{ secrets.SIIGO_PARTNER_ID }}
+      SIIGO_BASE_URL: ${{ secrets.SIIGO_BASE_URL }}
+      SIIGO_AUTHORIZATION_HEADER: ${{ secrets.SIIGO_AUTHORIZATION_HEADER }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_SCHEMA: public
+      SIIGO_SYNC_LOOKBACK_DAYS: ${{ github.event.inputs.days_back || vars.SIIGO_SYNC_LOOKBACK_DAYS || '90' }}
+      SYNC_FROM_DATE: ${{ github.event.inputs.sync_from_date }}
+      SYNC_TO_DATE: ${{ github.event.inputs.sync_to_date }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run sync
+        run: python sync_siigo_to_supabase.py
